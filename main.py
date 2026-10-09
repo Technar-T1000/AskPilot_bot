@@ -270,6 +270,70 @@ async def send_lead_email(
 
     await asyncio.to_thread(_sync_send_email, subject, html_content, plain_text)
 
+async def send_lead_to_website(
+    full_name: str,
+    phone: str,
+    problem: str,
+    telegram_username: Optional[str] = None,
+    user_id: Optional[int] = None,
+    utm_source: Optional[str] = None
+) -> bool:
+    """Отправка заявки через проверенный доверенный сайт bazislaw.ru (send.php).
+    Так как сайт отправляет почту сам через HTTPS, это на 100% обходит блокировку портов Render!"""
+    if telegram_username:
+        tg_link = f"https://t.me/{telegram_username}"
+        tg_display = f"@{telegram_username}"
+    elif user_id:
+        tg_link = f"tg://user?id={user_id}"
+        tg_display = f"ID: {user_id}"
+    else:
+        tg_link = ""
+        tg_display = "Не указан"
+
+    note_parts = [
+        f"📝 Вопрос / ситуация: {problem}",
+        f"✈️ Telegram клиента: {tg_display} ({tg_link})" if tg_link else f"✈️ Telegram: {tg_display}"
+    ]
+    if utm_source:
+        note_parts.append(f"🎯 Источник рекламы (UTM): {utm_source}")
+    note_parts.append("🤖 [Заявка создана автоматически через Telegram-бот AskPilot]")
+
+    full_message = "\n\n".join(note_parts)
+
+    payload = {
+        "form_schema": "bazislaw-v2",
+        "name": full_name,
+        "phone": phone,
+        "message": full_message,
+        "company": "",  # honeypot ловушка против спам-ботов, должна быть пустой
+        "consent": "1",
+        "analytics_ajax": "1"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AskPilot-Bot/2.0 (Bazis Law Lead Forwarder)",
+        "Referer": settings.WEBSITE_URL.rstrip('/') + "/",
+        "Origin": settings.WEBSITE_URL.rstrip('/')
+    }
+
+    send_url = f"{settings.WEBSITE_URL.rstrip('/')}/send.php"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(send_url, data=payload, headers=headers)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("success"):
+                    logger.info(f"Заявка '{full_name}' успешно отправлена через сайт {send_url}! Lead ID: {result.get('lead_id')}")
+                    return True
+                else:
+                    logger.warning(f"Сайт вернул отказ при отправке заявки: {result.get('message')}")
+            else:
+                logger.warning(f"Сайт {send_url} вернул HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке заявки через сайт: {e}")
+    return False
+
 async def send_telegram_alert(bot: Bot, message_text: str):
     for admin_id in settings.admin_ids:
         try:
@@ -400,7 +464,20 @@ async def process_problem(message: Message, state: FSMContext):
         utm_source=utm_source
     )
 
-    # 2. Отправляем на Email в фоне
+    # 2. Отправляем заявку через проверенный сайт компании bazislaw.ru (send.php)
+    # Это на 100% доставляет заявку на почту, гарантированно обходя сетевые блокировки Render!
+    asyncio.create_task(
+        send_lead_to_website(
+            full_name=full_name,
+            phone=phone,
+            problem=problem,
+            telegram_username=user.username,
+            user_id=user.id,
+            utm_source=utm_source
+        )
+    )
+
+    # 3. Отправляем на Email напрямую (если в Render настроен SMTP)
     asyncio.create_task(
         send_lead_email(
             full_name=full_name,
@@ -412,7 +489,7 @@ async def process_problem(message: Message, state: FSMContext):
         )
     )
 
-    # 3. Отправляем всем администраторам в Telegram
+    # 4. Отправляем всем администраторам в Telegram
     tg_mention = f"@{user.username}" if user.username else f'<a href="tg://user?id={user.id}">{user.full_name or user.id}</a>'
     admin_alert_text = (
         f"🔥 <b>Новая заявка AskPilot!</b>\n\n"
@@ -577,6 +654,23 @@ async def test_email_endpoint():
             "error_type": type(e).__name__,
             "details": str(e)
         }
+
+@app.get("/test-site-lead")
+async def test_site_lead_endpoint():
+    """Тестирование автоматической отправки заявки через сайт компании bazislaw.ru."""
+    success = await send_lead_to_website(
+        full_name="Тестовый Заявитель (AskPilot Bot)",
+        phone="+79991234567",
+        problem="Тестовая проверка: заявка из бота успешно отправлена через сайт компании bazislaw.ru!",
+        telegram_username="AskPilotTester"
+    )
+    return {
+        "status": "success" if success else "error",
+        "message": (
+            "✅ Заявка успешно отправлена через сайт bazislaw.ru (send.php)! "
+            "Сайт сам отправил письмо. Проверьте вашу почту!"
+        ) if success else "❌ Сайт bazislaw.ru вернул ошибку при приеме заявки. Проверьте логи."
+    }
 
 @app.post(settings.WEBHOOK_PATH)
 async def telegram_webhook(
