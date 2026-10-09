@@ -79,3 +79,20 @@ async def send_lead_email(
         await asyncio.to_thread(_sync_send_email, subject, html_content)
     except Exception as e:
         logger.error(f"Не удалось отправить email-уведомление: {e}")
+
+
+async def send_telegram_alert(bot, message_text: str):
+    """Отправка уведомления всем администраторам из списка ADMIN_TELEGRAM_IDS."""
+    admin_ids = settings.admin_ids
+    if not admin_ids:
+        return
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=message_text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
