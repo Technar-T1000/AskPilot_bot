@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -14,6 +16,9 @@ from aiogram.fsm.state import State, StatesGroup
 
 from config import settings
 from database import upsert_user, create_lead
+from notifications import send_lead_email
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -174,6 +179,35 @@ async def process_problem(message: Message, state: FSMContext):
         phone=phone,
         problem=problem
     )
+
+    # Отправляем уведомление на email (в фоне)
+    asyncio.create_task(
+        send_lead_email(
+            full_name=full_name,
+            phone=phone,
+            problem=problem,
+            telegram_username=user.username,
+            user_id=user.id
+        )
+    )
+
+    # Если указан Telegram ID администратора, отправляем также в Telegram
+    if settings.ADMIN_TELEGRAM_ID:
+        try:
+            admin_text = (
+                f"🔥 <b>Новая заявка AskPilot!</b>\n\n"
+                f"👤 <b>ФИО:</b> {full_name}\n"
+                f"📞 <b>Телефон:</b> {phone}\n"
+                f"💬 <b>Telegram:</b> @{user.username or user.id}\n"
+                f"📝 <b>Проблема:</b> {problem}"
+            )
+            await message.bot.send_message(
+                chat_id=settings.ADMIN_TELEGRAM_ID,
+                text=admin_text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление в ЛС админу: {e}")
 
     await state.clear()
 
