@@ -530,6 +530,54 @@ async def manual_set_webhook():
         "webhook_url": settings.webhook_url
     }
 
+@app.get("/test-email")
+async def test_email_endpoint():
+    """Тестирование отправки письма с возвратом детального статуса или ошибки прямо в браузере."""
+    if not settings.SMTP_USER:
+        return {
+            "status": "error",
+            "message": "В Render не настроена переменная SMTP_USER. Добавьте в Environment: SMTP_USER = fedserggas@yandex.ru"
+        }
+    if not settings.SMTP_PASSWORD:
+        return {
+            "status": "error",
+            "message": "В Render не настроена переменная SMTP_PASSWORD. Добавьте в Environment 16-значный пароль приложения Яндекса."
+        }
+    
+    def _test_send():
+        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            msg = MIMEText(
+                "Это тестовое письмо от AskPilot Bot!\n\n"
+                "Если вы получили это письмо, значит отправка заявок из бота настроена и работает идеально!",
+                "plain",
+                "utf-8"
+            )
+            msg["Subject"] = "🧪 Тест почты AskPilot Bot"
+            msg["From"] = settings.SMTP_USER
+            msg["To"] = settings.NOTIFICATION_EMAIL
+            server.sendmail(settings.SMTP_USER, [settings.NOTIFICATION_EMAIL], msg.as_string())
+    
+    try:
+        await asyncio.to_thread(_test_send)
+        return {
+            "status": "success",
+            "message": f"Тестовое письмо успешно отправлено с {settings.SMTP_USER} на {settings.NOTIFICATION_EMAIL}! Проверьте папку 'Входящие' и 'Спам'."
+        }
+    except smtplib.SMTPAuthenticationError as e:
+        return {
+            "status": "error",
+            "error_type": "SMTPAuthenticationError (Ошибка авторизации)",
+            "details": str(e),
+            "hint": "Яндекс отклонил пароль. Убедитесь, что в Render указан 16-значный Пароль приложения, созданный в id.yandex.ru/security -> Пароли приложений -> Почта."
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "details": str(e)
+        }
+
 @app.post(settings.WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
