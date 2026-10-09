@@ -154,15 +154,17 @@ async def create_lead(user_id: int, telegram_username: Optional[str], full_name:
 # 3. УВЕДОМЛЕНИЯ (EMAIL + TELEGRAM АДМИНИСТРАТОРЫ)
 # ==============================================================================
 
-def _sync_send_email(subject: str, html_body: str):
+def _sync_send_email(subject: str, html_body: str, plain_text: str = ""):
     if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
         logger.warning("SMTP_USER или SMTP_PASSWORD не настроены в Render. Email пропущен.")
         return
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = settings.SMTP_USER
+        msg["From"] = f"AskPilot Bot <{settings.SMTP_USER}>"
         msg["To"] = settings.NOTIFICATION_EMAIL
+        if plain_text:
+            msg.attach(MIMEText(plain_text, "plain", "utf-8"))
         msg.attach(MIMEText(html_body, "html", "utf-8"))
 
         if settings.SMTP_PORT == 465:
@@ -178,26 +180,95 @@ def _sync_send_email(subject: str, html_body: str):
     except Exception as e:
         logger.error(f"Ошибка отправки email: {e}")
 
-async def send_lead_email(full_name: str, phone: str, problem: str, telegram_username: Optional[str] = None, user_id: Optional[int] = None):
-    subject = f"🔥 Новая заявка AskPilot: {full_name}"
-    tg_user_str = f"@{telegram_username}" if telegram_username else f"ID: {user_id}"
-    tg_link = f"https://t.me/{telegram_username}" if telegram_username else ""
+async def send_lead_email(
+    full_name: str,
+    phone: str,
+    problem: str,
+    telegram_username: Optional[str] = None,
+    user_id: Optional[int] = None,
+    utm_source: Optional[str] = None
+):
+    subject = f"🔥 Новая заявка AskPilot: {full_name} ({phone})"
+    
+    # Формируем ссылку на профиль Telegram
+    if telegram_username:
+        tg_url = f"https://t.me/{telegram_username}"
+        tg_display = f"@{telegram_username}"
+    elif user_id:
+        tg_url = f"tg://user?id={user_id}"
+        tg_display = f"ID: {user_id}"
+    else:
+        tg_url = ""
+        tg_display = "Не указан"
+
+    utm_row = f"""
+    <tr>
+        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #666;"><strong>🎯 Источник (UTM):</strong></td>
+        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #333;">{utm_source}</td>
+    </tr>
+    """ if utm_source else ""
 
     html_content = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-        <h2 style="color: #2b5797; margin-top: 0;">🚀 Новая заявка AskPilot Bot</h2>
-        <hr style="border: none; border-top: 1px solid #eee; margin: 15px 0;">
-        <p><strong>👤 ФИО:</strong> {full_name}</p>
-        <p><strong>📞 Телефон:</strong> <a href="tel:{phone}">{phone}</a></p>
-        <p><strong>✈️ Telegram:</strong> {f'<a href="{tg_link}">{tg_user_str}</a>' if tg_link else tg_user_str}</p>
-        <div style="background-color: #f8f9fa; padding: 15px; border-left: 4px solid #2b5797; margin: 15px 0;">
-            <p style="margin: 0; font-weight: bold;">📝 Проблема / задача:</p>
-            <p style="margin: 8px 0 0 0;">{problem}</p>
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family: Arial, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0;">
+        <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border: 1px solid #e1e4e8;">
+            <div style="background-color: #1a4f8b; color: #ffffff; padding: 20px; text-align: center;">
+                <h2 style="margin: 0; font-size: 22px;">⚖️ Юридическая компания «Базис»</h2>
+                <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px;">Новая заявка через бота AskPilot</p>
+            </div>
+            <div style="padding: 24px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 15px;">
+                    <tr>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; width: 150px; color: #666;"><strong>👤 ФИО клиента:</strong></td>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #111; font-weight: bold; font-size: 16px;">{full_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #666;"><strong>📞 Телефон:</strong></td>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0;">
+                            <a href="tel:{phone}" style="color: #1a4f8b; font-size: 16px; font-weight: bold; text-decoration: none;">{phone}</a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #666;"><strong>✈️ Telegram:</strong></td>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0;">
+                            {f'<a href="{tg_url}" style="color: #0088cc; font-weight: bold; text-decoration: underline;">{tg_display}</a>' if tg_url else tg_display}
+                        </td>
+                    </tr>
+                    {utm_row}
+                </table>
+
+                <div style="margin-top: 20px; padding: 16px; background-color: #f8fafc; border-left: 4px solid #1a4f8b; border-radius: 4px;">
+                    <div style="color: #666; font-size: 13px; font-weight: bold; text-transform: uppercase; margin-bottom: 6px;">📝 Описание проблемы / вопроса:</div>
+                    <div style="color: #222; font-size: 15px; line-height: 1.5; white-space: pre-wrap;">{problem}</div>
+                </div>
+
+                {f'''
+                <div style="text-align: center; margin-top: 25px;">
+                    <a href="{tg_url}" style="display: inline-block; background-color: #0088cc; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; font-size: 15px;">
+                        ✈️ Открыть диалог в Telegram
+                    </a>
+                </div>
+                ''' if tg_url else ''}
+            </div>
+            <div style="background-color: #f8f9fa; padding: 12px 20px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #eeeeee;">
+                Заявка сохранена в базе Supabase • AskPilot Bot
+            </div>
         </div>
-        <p style="font-size: 12px; color: #888;">Заявка сохранена в базе Supabase.</p>
-    </div>
+    </body>
+    </html>
     """
-    await asyncio.to_thread(_sync_send_email, subject, html_content)
+
+    plain_text = (
+        f"НОВАЯ ЗАЯВКА ASKPILOT:\n\n"
+        f"ФИО: {full_name}\n"
+        f"Телефон: {phone}\n"
+        f"Telegram: {tg_display} ({tg_url})\n\n"
+        f"Описание проблемы:\n{problem}\n"
+    )
+
+    await asyncio.to_thread(_sync_send_email, subject, html_content, plain_text)
 
 async def send_telegram_alert(bot: Bot, message_text: str):
     for admin_id in settings.admin_ids:
@@ -244,6 +315,8 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
     await state.clear()
     user = message.from_user
     utm_source = command.args if command.args else None
+    if utm_source:
+        await state.update_data(utm_source=utm_source)
 
     await upsert_user(
         telegram_id=user.id,
@@ -314,6 +387,7 @@ async def process_problem(message: Message, state: FSMContext):
     user_data = await state.get_data()
     full_name = user_data.get("full_name")
     phone = user_data.get("phone")
+    utm_source = user_data.get("utm_source")
     user = message.from_user
 
     # 1. Сохраняем в Supabase
@@ -322,7 +396,8 @@ async def process_problem(message: Message, state: FSMContext):
         telegram_username=user.username,
         full_name=full_name,
         phone=phone,
-        problem=problem
+        problem=problem,
+        utm_source=utm_source
     )
 
     # 2. Отправляем на Email в фоне
@@ -332,18 +407,23 @@ async def process_problem(message: Message, state: FSMContext):
             phone=phone,
             problem=problem,
             telegram_username=user.username,
-            user_id=user.id
+            user_id=user.id,
+            utm_source=utm_source
         )
     )
 
     # 3. Отправляем всем администраторам в Telegram
+    tg_mention = f"@{user.username}" if user.username else f'<a href="tg://user?id={user.id}">{user.full_name or user.id}</a>'
     admin_alert_text = (
         f"🔥 <b>Новая заявка AskPilot!</b>\n\n"
         f"👤 <b>ФИО:</b> {full_name}\n"
         f"📞 <b>Телефон:</b> {phone}\n"
-        f"💬 <b>Telegram:</b> @{user.username or user.id}\n"
+        f"💬 <b>Telegram:</b> {tg_mention}\n"
         f"📝 <b>Проблема:</b> {problem}"
     )
+    if utm_source:
+        admin_alert_text += f"\n🎯 <b>Источник (UTM):</b> {utm_source}"
+
     asyncio.create_task(send_telegram_alert(message.bot, admin_alert_text))
 
     await state.clear()
