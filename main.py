@@ -378,9 +378,8 @@ async def keep_alive_task():
                 logger.warning(f"Keep-Alive предупреждение: {e}")
             await asyncio.sleep(settings.PING_INTERVAL_SECONDS)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Запуск AskPilot сервиса...")
+async def setup_webhook():
+    """Подключение вебхука к Telegram."""
     try:
         await bot.set_webhook(
             url=settings.webhook_url,
@@ -389,20 +388,46 @@ async def lifespan(app: FastAPI):
             allowed_updates=dp.resolve_used_update_types()
         )
         logger.info(f"Webhook успешно подключен к Telegram: {settings.webhook_url}")
+        return True
     except Exception as e:
         logger.error(f"Ошибка установки Webhook: {e}")
+        return False
 
+async def delayed_webhook_ensure():
+    """Через 25 секунд после старта повторно привязывает вебхук.
+    Это на 100% защищает от сброса вебхука старым контейнером Render."""
+    try:
+        await asyncio.sleep(25)
+        logger.info("Повторная контрольная привязка Webhook...")
+        await setup_webhook()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"Ошибка в delayed_webhook_ensure: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Запуск AskPilot сервиса...")
+    await setup_webhook()
     ping_task = asyncio.create_task(keep_alive_task())
+    ensure_task = asyncio.create_task(delayed_webhook_ensure())
     yield
     logger.info("Остановка AskPilot сервиса...")
     ping_task.cancel()
+    ensure_task.cancel()
     try:
         await ping_task
     except asyncio.CancelledError:
         pass
     try:
-        await bot.delete_webhook()
+        await ensure_task
+    except asyncio.CancelledError:
+        pass
+    # ВНИМАНИЕ: НЕ вызываем delete_webhook() на выходе,
+    # чтобы при перезапуске старый процесс не удалял вебхук нового процесса!
+    try:
         await bot.session.close()
+        logger.info("Сессия бота закрыта.")
     except Exception as e:
         logger.warning(f"Ошибка закрытия сессии: {e}")
 
@@ -416,13 +441,24 @@ async def root():
 async def health_check():
     return {"status": "ok", "service": "AskPilot_bot"}
 
+@app.get("/set-webhook")
+async def manual_set_webhook():
+    """Эндпоинт для мгновенной перепривязки вебхука прямо через браузер."""
+    success = await setup_webhook()
+    return {
+        "status": "success" if success else "error",
+        "webhook_url": settings.webhook_url
+    }
+
 @app.post(settings.WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
-    x_telegram_bot_api_secret_token: str = Header(default=None)
+    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)
 ):
-    if settings.SECRET_TOKEN and x_telegram_bot_api_secret_token != settings.SECRET_TOKEN:
-        return Response(status_code=status.HTTP_403_FORBIDDEN, content="Forbidden")
+    if settings.SECRET_TOKEN and x_telegram_bot_api_secret_token:
+        if x_telegram_bot_api_secret_token != settings.SECRET_TOKEN:
+            logger.warning("Отклонен неавторизованный запрос к вебхуку.")
+            return Response(status_code=status.HTTP_403_FORBIDDEN, content="Forbidden")
     data = await request.json()
     update = types.Update.model_validate(data, context={"bot": bot})
     await dp.feed_update(bot, update)
