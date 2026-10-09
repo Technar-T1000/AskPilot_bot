@@ -4,6 +4,7 @@ import logging
 import smtplib
 import html
 import time
+import secrets
 import httpx
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -469,6 +470,8 @@ async def process_problem(message: Message, state: FSMContext):
         )
         await state.clear()
         return
+    if len(user_last_submission) > 5000:
+        user_last_submission.clear()
     user_last_submission[user.id] = now
 
     user_data = await state.get_data()
@@ -705,7 +708,7 @@ async def telegram_webhook(
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)
 ):
     if settings.SECRET_TOKEN:
-        if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != settings.SECRET_TOKEN:
+        if not x_telegram_bot_api_secret_token or not secrets.compare_digest(x_telegram_bot_api_secret_token, settings.SECRET_TOKEN):
             logger.warning("Отклонен неавторизованный запрос к вебхуку (отсутствует или не совпадает секретный токен).")
             return Response(status_code=status.HTTP_403_FORBIDDEN, content="Forbidden")
     data = await request.json()
