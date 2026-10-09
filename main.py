@@ -2,6 +2,8 @@ import os
 import asyncio
 import logging
 import smtplib
+import html
+import time
 import httpx
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -201,10 +203,15 @@ async def send_lead_email(
         tg_url = ""
         tg_display = "Не указан"
 
+    safe_name = html.escape(full_name)
+    safe_phone = html.escape(phone)
+    safe_problem = html.escape(problem)
+    safe_utm = html.escape(utm_source) if utm_source else ""
+
     utm_row = f"""
     <tr>
         <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #666;"><strong>🎯 Источник (UTM):</strong></td>
-        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #333;">{utm_source}</td>
+        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #333;">{safe_utm}</td>
     </tr>
     """ if utm_source else ""
 
@@ -222,12 +229,12 @@ async def send_lead_email(
                 <table style="width: 100%; border-collapse: collapse; font-size: 15px;">
                     <tr>
                         <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; width: 150px; color: #666;"><strong>👤 ФИО клиента:</strong></td>
-                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #111; font-weight: bold; font-size: 16px;">{full_name}</td>
+                        <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #111; font-weight: bold; font-size: 16px;">{safe_name}</td>
                     </tr>
                     <tr>
                         <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0; color: #666;"><strong>📞 Телефон:</strong></td>
                         <td style="padding: 10px 0; border-bottom: 1px solid #f0f0f0;">
-                            <a href="tel:{phone}" style="color: #1a4f8b; font-size: 16px; font-weight: bold; text-decoration: none;">{phone}</a>
+                            <a href="tel:{safe_phone}" style="color: #1a4f8b; font-size: 16px; font-weight: bold; text-decoration: none;">{safe_phone}</a>
                         </td>
                     </tr>
                     <tr>
@@ -241,7 +248,7 @@ async def send_lead_email(
 
                 <div style="margin-top: 20px; padding: 16px; background-color: #f8fafc; border-left: 4px solid #1a4f8b; border-radius: 4px;">
                     <div style="color: #666; font-size: 13px; font-weight: bold; text-transform: uppercase; margin-bottom: 6px;">📝 Описание проблемы / вопроса:</div>
-                    <div style="color: #222; font-size: 15px; line-height: 1.5; white-space: pre-wrap;">{problem}</div>
+                    <div style="color: #222; font-size: 15px; line-height: 1.5; white-space: pre-wrap;">{safe_problem}</div>
                 </div>
 
                 {f'''
@@ -347,6 +354,9 @@ async def send_telegram_alert(bot: Bot, message_text: str):
 
 router = Router()
 
+# Защита от флуда и спама: хранит время последней заявки пользователя
+user_last_submission: Dict[int, float] = {}
+
 class LeadForm(StatesGroup):
     waiting_for_full_name = State()
     waiting_for_phone = State()
@@ -448,11 +458,23 @@ async def process_phone(message: Message, state: FSMContext):
 @router.message(LeadForm.waiting_for_problem)
 async def process_problem(message: Message, state: FSMContext):
     problem = message.text.strip()
+    user = message.from_user
+
+    # Защита от флуда: не чаще 1 заявки в 30 секунд от одного пользователя
+    now = time.time()
+    if now - user_last_submission.get(user.id, 0) < 30:
+        await message.answer(
+            "⚠️ Вы уже недавно отправили заявку. Мы уже получили её и свяжемся с вами в ближайшее время.",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+        return
+    user_last_submission[user.id] = now
+
     user_data = await state.get_data()
     full_name = user_data.get("full_name")
     phone = user_data.get("phone")
     utm_source = user_data.get("utm_source")
-    user = message.from_user
 
     # 1. Сохраняем в Supabase
     lead = await create_lead(
@@ -489,17 +511,22 @@ async def process_problem(message: Message, state: FSMContext):
         )
     )
 
-    # 4. Отправляем всем администраторам в Telegram
-    tg_mention = f"@{user.username}" if user.username else f'<a href="tg://user?id={user.id}">{user.full_name or user.id}</a>'
+    # 4. Отправляем всем администраторам в Telegram (с экранированием HTML против сбоев разметки)
+    safe_name = html.escape(full_name)
+    safe_phone = html.escape(phone)
+    safe_problem = html.escape(problem)
+    safe_utm = html.escape(utm_source) if utm_source else ""
+    tg_mention = f"@{user.username}" if user.username else f'<a href="tg://user?id={user.id}">{html.escape(user.full_name or str(user.id))}</a>'
+
     admin_alert_text = (
         f"🔥 <b>Новая заявка AskPilot!</b>\n\n"
-        f"👤 <b>ФИО:</b> {full_name}\n"
-        f"📞 <b>Телефон:</b> {phone}\n"
+        f"👤 <b>ФИО:</b> {safe_name}\n"
+        f"📞 <b>Телефон:</b> {safe_phone}\n"
         f"💬 <b>Telegram:</b> {tg_mention}\n"
-        f"📝 <b>Проблема:</b> {problem}"
+        f"📝 <b>Проблема:</b> {safe_problem}"
     )
-    if utm_source:
-        admin_alert_text += f"\n🎯 <b>Источник (UTM):</b> {utm_source}"
+    if safe_utm:
+        admin_alert_text += f"\n🎯 <b>Источник (UTM):</b> {safe_utm}"
 
     asyncio.create_task(send_telegram_alert(message.bot, admin_alert_text))
 
@@ -677,9 +704,9 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)
 ):
-    if settings.SECRET_TOKEN and x_telegram_bot_api_secret_token:
-        if x_telegram_bot_api_secret_token != settings.SECRET_TOKEN:
-            logger.warning("Отклонен неавторизованный запрос к вебхуку.")
+    if settings.SECRET_TOKEN:
+        if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != settings.SECRET_TOKEN:
+            logger.warning("Отклонен неавторизованный запрос к вебхуку (отсутствует или не совпадает секретный токен).")
             return Response(status_code=status.HTTP_403_FORBIDDEN, content="Forbidden")
     data = await request.json()
     update = types.Update.model_validate(data, context={"bot": bot})
