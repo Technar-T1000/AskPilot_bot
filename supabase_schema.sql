@@ -36,3 +36,9 @@ CREATE INDEX IF NOT EXISTS idx_leads_created_at ON public.leads (created_at DESC
 
 COMMENT ON TABLE public.users IS 'Пользователи, перешедшие в бота (в т.ч. из TG Ads)';
 COMMENT ON TABLE public.leads IS 'Лиды с заполненными ФИО, телефоном и описанием проблемы';
+
+-- 3. Безопасность данных: Row-Level Security (RLS)
+-- Защита от утечки базы: блокирует неавторизованные запросы к таблицам через публичный anon-ключ.
+-- Бэкенд бота с service_role ключом продолжает работать без ограничений.
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY;
