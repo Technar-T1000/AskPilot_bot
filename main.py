@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     # Server settings
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    PING_INTERVAL_SECONDS: int = 840  # 14 минут (Render засыпает через 15)
 
     # 4 ссылки для кнопок
     MAX_APP_URL: str = "https://max.ru/u/f9LHodD0cOL6l-6QMFdUEZxEMAvmjgiz0m9IZLT_QELNVMmYCTr5i9PGaTw"
@@ -89,10 +88,6 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.WEBHOOK_BASE_URL.rstrip('/')}{self.WEBHOOK_PATH}"
-
-    @property
-    def health_url(self) -> str:
-        return f"{self.WEBHOOK_BASE_URL.rstrip('/')}/health"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -385,6 +380,33 @@ def get_phone_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=True
     )
 
+@router.message(Command("my_id"))
+async def cmd_my_id(message: Message):
+    """Показывает текущему пользователю его Telegram ID."""
+    is_admin = message.from_user.id in settings.admin_ids
+    status_text = " (Вы в списке администраторов ✅)" if is_admin else ""
+    await message.answer(
+        f"Ваш Telegram ID: <code>{message.from_user.id}</code>{status_text}",
+        parse_mode="HTML"
+    )
+
+@router.message(Command("test_alert"))
+async def cmd_test_alert(message: Message):
+    """Тестовая отправка алерта только администраторам."""
+    if message.from_user.id not in settings.admin_ids:
+        await message.answer("❌ У вас нет прав администратора.")
+        return
+
+    total = len(settings.admin_ids)
+    test_msg = (
+        f"🧪 <b>Тестовое оповещение AskPilot!</b>\n\n"
+        f"Тест запущен администратором @{message.from_user.username or message.from_user.id}.\n"
+        f"В настройках подключено администраторов: <b>{total}</b>.\n"
+        f"Это сообщение рассылается <b>строго и исключительно</b> по списку <code>ADMIN_TELEGRAM_IDS</code>."
+    )
+    await send_telegram_alert(message.bot, test_msg)
+    await message.answer(f"✅ Тестовое оповещение успешно отправлено всем {total} администраторам!")
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     await state.clear()
@@ -403,7 +425,7 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
 
     welcome_text = (
         f"Здравствуйте, {user.first_name}!\n\n"
-        "Добро пожаловать в **AskPilot** 🚀\n"
+        "Добро пожаловать в **Базис** 🚀\n"
         "Мы готовы оперативно помочь вам решить любой вопрос.\n\n"
         "Выберите удобный способ связи или заполните заявку прямо сейчас:"
     )
@@ -545,25 +567,12 @@ async def process_problem(message: Message, state: FSMContext):
     await message.answer(response_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 # ==============================================================================
-# 5. СЕРВЕР FASTAPI, WEBHOOK И KEEP-ALIVE
+# 5. СЕРВЕР FASTAPI И WEBHOOK
 # ==============================================================================
 
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(router)
-
-async def keep_alive_task():
-    logger.info(f"Запущен фоновый мониторинг Keep-Alive. Интервал: {settings.PING_INTERVAL_SECONDS} сек.")
-    await asyncio.sleep(10)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while True:
-            try:
-                url = settings.health_url
-                res = await client.get(url)
-                logger.info(f"Keep-Alive пинг -> {url} (HTTP {res.status_code})")
-            except Exception as e:
-                logger.warning(f"Keep-Alive предупреждение: {e}")
-            await asyncio.sleep(settings.PING_INTERVAL_SECONDS)
 
 async def setup_webhook():
     """Подключение вебхука к Telegram."""
@@ -596,16 +605,10 @@ async def delayed_webhook_ensure():
 async def lifespan(app: FastAPI):
     logger.info("Запуск AskPilot сервиса...")
     await setup_webhook()
-    ping_task = asyncio.create_task(keep_alive_task())
     ensure_task = asyncio.create_task(delayed_webhook_ensure())
     yield
     logger.info("Остановка AskPilot сервиса...")
-    ping_task.cancel()
     ensure_task.cancel()
-    try:
-        await ping_task
-    except asyncio.CancelledError:
-        pass
     try:
         await ensure_task
     except asyncio.CancelledError:
@@ -637,69 +640,15 @@ async def manual_set_webhook():
         "webhook_url": settings.webhook_url
     }
 
-@app.get("/test-email")
-async def test_email_endpoint():
-    """Тестирование отправки письма с возвратом детального статуса или ошибки прямо в браузере."""
-    if not settings.SMTP_USER:
-        return {
-            "status": "error",
-            "message": "В Render не настроена переменная SMTP_USER. Добавьте в Environment: SMTP_USER = fedserggas@yandex.ru"
-        }
-    if not settings.SMTP_PASSWORD:
-        return {
-            "status": "error",
-            "message": "В Render не настроена переменная SMTP_PASSWORD. Добавьте в Environment 16-значный пароль приложения Яндекса."
-        }
-    
-    def _test_send():
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
-            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            msg = MIMEText(
-                "Это тестовое письмо от AskPilot Bot!\n\n"
-                "Если вы получили это письмо, значит отправка заявок из бота настроена и работает идеально!",
-                "plain",
-                "utf-8"
-            )
-            msg["Subject"] = "🧪 Тест почты AskPilot Bot"
-            msg["From"] = settings.SMTP_USER
-            msg["To"] = settings.NOTIFICATION_EMAIL
-            server.sendmail(settings.SMTP_USER, [settings.NOTIFICATION_EMAIL], msg.as_string())
-    
-    try:
-        await asyncio.to_thread(_test_send)
-        return {
-            "status": "success",
-            "message": f"Тестовое письмо успешно отправлено с {settings.SMTP_USER} на {settings.NOTIFICATION_EMAIL}! Проверьте папку 'Входящие' и 'Спам'."
-        }
-    except smtplib.SMTPAuthenticationError as e:
-        return {
-            "status": "error",
-            "error_type": "SMTPAuthenticationError (Ошибка авторизации)",
-            "details": str(e),
-            "hint": "Яндекс отклонил пароль. Убедитесь, что в Render указан 16-значный Пароль приложения, созданный в id.yandex.ru/security -> Пароли приложений -> Почта."
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error_type": type(e).__name__,
-            "details": str(e)
-        }
-
-@app.get("/test-site-lead")
-async def test_site_lead_endpoint():
-    """Тестирование автоматической отправки заявки через сайт компании bazislaw.ru."""
-    success = await send_lead_to_website(
-        full_name="Тестовый Заявитель (AskPilot Bot)",
-        phone="+79991234567",
-        problem="Тестовая проверка: заявка из бота успешно отправлена через сайт компании bazislaw.ru!",
-        telegram_username="AskPilotTester"
-    )
+@app.get("/check-admins")
+async def check_admins_endpoint():
+    """Проверка количества и маскированного списка подключенных администраторов."""
+    masked = [f"{str(aid)[:3]}...{str(aid)[-2:]}" if len(str(aid)) > 5 else "***" for aid in settings.admin_ids]
     return {
-        "status": "success" if success else "error",
-        "message": (
-            "✅ Заявка успешно отправлена через сайт bazislaw.ru (send.php)! "
-            "Сайт сам отправил письмо. Проверьте вашу почту!"
-        ) if success else "❌ Сайт bazislaw.ru вернул ошибку при приеме заявки. Проверьте логи."
+        "status": "ok",
+        "total_admins": len(settings.admin_ids),
+        "admin_ids_masked": masked,
+        "note": "Уведомления о заявках отправляются СТРОГО и ИСКЛЮЧИТЕЛЬНО этим администраторам."
     }
 
 @app.post(settings.WEBHOOK_PATH)
