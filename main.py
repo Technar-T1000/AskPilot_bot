@@ -128,18 +128,47 @@ def _sync_upsert_user(telegram_id: int, username: Optional[str], first_name: Opt
     response = supabase.table("users").upsert(data, on_conflict="telegram_id").execute()
     return response.data
 
-def _sync_create_lead(user_id: int, telegram_username: Optional[str], full_name: str, phone: str, problem: str, utm_source: Optional[str]) -> Dict[str, Any]:
+def _sync_create_lead(
+    user_id: int,
+    telegram_name: Optional[str],
+    telegram_username: Optional[str],
+    full_name: str,
+    phone: str,
+    problem: str,
+    utm_source: Optional[str] = None,
+    consent_given: bool = True
+) -> Dict[str, Any]:
     data = {
         "user_id": user_id,
+        "telegram_name": telegram_name,
         "telegram_username": telegram_username,
         "full_name": full_name,
         "phone": phone,
         "problem": problem,
         "utm_source": utm_source,
+        "consent_given": consent_given,
         "status": "new"
     }
-    response = supabase.table("leads").insert(data).execute()
-    return response.data
+    try:
+        response = supabase.table("leads").insert(data).execute()
+        return response.data
+    except Exception as e:
+        # Резервный сценарий: если новые колонки еще не добавлены в Supabase через SQL,
+        # сохраняем в базовые поля, чтобы заявка ни при каких обстоятельствах не потерялась!
+        if "telegram_name" in str(e) or "consent_given" in str(e):
+            logger.warning(f"Новые колонки еще не созданы в Supabase, сохраняем в базовые: {e}")
+            fallback_data = {
+                "user_id": user_id,
+                "telegram_username": telegram_username,
+                "full_name": full_name,
+                "phone": phone,
+                "problem": problem,
+                "utm_source": utm_source,
+                "status": "new"
+            }
+            response = supabase.table("leads").insert(fallback_data).execute()
+            return response.data
+        raise e
 
 async def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str], utm_source: Optional[str] = None):
     try:
@@ -148,9 +177,28 @@ async def upsert_user(telegram_id: int, username: Optional[str], first_name: Opt
         logger.error(f"Ошибка сохранения пользователя {telegram_id} в Supabase: {e}")
         return None
 
-async def create_lead(user_id: int, telegram_username: Optional[str], full_name: str, phone: str, problem: str, utm_source: Optional[str] = None):
+async def create_lead(
+    user_id: int,
+    telegram_name: Optional[str],
+    telegram_username: Optional[str],
+    full_name: str,
+    phone: str,
+    problem: str,
+    utm_source: Optional[str] = None,
+    consent_given: bool = True
+):
     try:
-        return await asyncio.to_thread(_sync_create_lead, user_id, telegram_username, full_name, phone, problem, utm_source)
+        return await asyncio.to_thread(
+            _sync_create_lead,
+            user_id,
+            telegram_name,
+            telegram_username,
+            full_name,
+            phone,
+            problem,
+            utm_source,
+            consent_given
+        )
     except Exception as e:
         logger.error(f"Ошибка сохранения лида в Supabase: {e}")
         return None
@@ -516,14 +564,19 @@ async def process_problem(message: Message, state: FSMContext):
     phone = user_data.get("phone")
     utm_source = user_data.get("utm_source")
 
-    # 1. Сохраняем в Supabase
+    tg_name = user.full_name or user.first_name or f"User {user.id}"
+    tg_username = f"@{user.username}" if user.username else None
+
+    # 1. Сохраняем в Supabase с фиксацией данных Telegram и согласия 152-ФЗ
     lead = await create_lead(
         user_id=user.id,
-        telegram_username=user.username,
+        telegram_name=tg_name,
+        telegram_username=tg_username,
         full_name=full_name,
         phone=phone,
         problem=problem,
-        utm_source=utm_source
+        utm_source=utm_source,
+        consent_given=True
     )
 
     # 2. Отправляем заявку через проверенный сайт компании bazislaw.ru (send.php)
@@ -563,7 +616,8 @@ async def process_problem(message: Message, state: FSMContext):
         f"👤 <b>ФИО:</b> {safe_name}\n"
         f"📞 <b>Телефон:</b> {safe_phone}\n"
         f"💬 <b>Telegram:</b> {tg_mention}\n"
-        f"📝 <b>Проблема:</b> {safe_problem}"
+        f"📝 <b>Проблема:</b> {safe_problem}\n"
+        f"⚖️ <b>Согласие 152-ФЗ:</b> Подтверждено ✅"
     )
     if safe_utm:
         admin_alert_text += f"\n🎯 <b>Источник (UTM):</b> {safe_utm}"
