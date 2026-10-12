@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     # Server settings
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    PING_INTERVAL_SECONDS: int = 720  # 12 минут (будильник против засыпания Render)
 
     # 4 ссылки для кнопок
     MAX_APP_URL: str = "https://max.ru/u/f9LHodD0cOL6l-6QMFdUEZxEMAvmjgiz0m9IZLT_QELNVMmYCTr5i9PGaTw"
@@ -88,6 +89,10 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.WEBHOOK_BASE_URL.rstrip('/')}{self.WEBHOOK_PATH}"
+
+    @property
+    def health_url(self) -> str:
+        return f"{self.WEBHOOK_BASE_URL.rstrip('/')}/health"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -574,6 +579,21 @@ bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(router)
 
+async def keep_alive_task():
+    """Фоновый 'будильник': каждые 12 минут отправляет GET-запрос на /health,
+    сбрасывая 15-минутный таймер засыпания бесплатного хостинга Render."""
+    logger.info(f"Запущен фоновый мониторинг Keep-Alive. Интервал: {settings.PING_INTERVAL_SECONDS} сек.")
+    await asyncio.sleep(20)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            try:
+                url = settings.health_url
+                res = await client.get(url)
+                logger.info(f"Keep-Alive пинг -> {url} (HTTP {res.status_code})")
+            except Exception as e:
+                logger.warning(f"Keep-Alive предупреждение: {e}")
+            await asyncio.sleep(settings.PING_INTERVAL_SECONDS)
+
 async def setup_webhook():
     """Подключение вебхука к Telegram."""
     try:
@@ -605,10 +625,16 @@ async def delayed_webhook_ensure():
 async def lifespan(app: FastAPI):
     logger.info("Запуск AskPilot сервиса...")
     await setup_webhook()
+    ping_task = asyncio.create_task(keep_alive_task())
     ensure_task = asyncio.create_task(delayed_webhook_ensure())
     yield
     logger.info("Остановка AskPilot сервиса...")
+    ping_task.cancel()
     ensure_task.cancel()
+    try:
+        await ping_task
+    except asyncio.CancelledError:
+        pass
     try:
         await ensure_task
     except asyncio.CancelledError:
