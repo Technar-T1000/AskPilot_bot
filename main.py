@@ -60,10 +60,12 @@ class Settings(BaseSettings):
     PORT: int = 8000
     PING_INTERVAL_SECONDS: int = 720  # 12 минут (будильник против засыпания Render)
 
-    # 4 ссылки для кнопок
+    # Ссылки для кнопок и 152-ФЗ
     MAX_APP_URL: str = "https://max.ru/u/f9LHodD0cOL6l-6QMFdUEZxEMAvmjgiz0m9IZLT_QELNVMmYCTr5i9PGaTw"
     TELEGRAM_SUPPORT_URL: str = "https://t.me/Advokaaty"
     WEBSITE_URL: str = "https://bazislaw.ru/"
+    CONSENT_URL: str = "https://bazislaw.ru/consent.html"
+    PRIVACY_URL: str = "https://bazislaw.ru/privacy.html"
 
     # Настройки отправки заявок на Email
     NOTIFICATION_EMAIL: str = "fedserggas@yandex.ru"
@@ -458,11 +460,19 @@ async def process_full_name(message: Message, state: FSMContext):
 
     await state.update_data(full_name=full_name)
     await state.set_state(LeadForm.waiting_for_phone)
-    await message.answer(
-        f"Спасибо, {full_name}!\n\n"
+    phone_prompt = (
+        f"Спасибо, {html.escape(full_name)}!\n\n"
         "Шаг 2 из 3: Укажите ваш контактный номер телефона "
-        "(кнопкой ниже или текстом вручную):",
-        reply_markup=get_phone_keyboard()
+        "(кнопкой ниже или текстом вручную):\n\n"
+        f"⚖️ <i>Отправляя номер телефона, вы подтверждаете "
+        f"<a href=\"{settings.CONSENT_URL}\">Согласие на обработку персональных данных</a> "
+        f"в соответствии с <a href=\"{settings.PRIVACY_URL}\">Политикой конфиденциальности</a>.</i>"
+    )
+    await message.answer(
+        phone_prompt,
+        parse_mode="HTML",
+        reply_markup=get_phone_keyboard(),
+        disable_web_page_preview=True
     )
 
 @router.message(LeadForm.waiting_for_phone, F.contact)
